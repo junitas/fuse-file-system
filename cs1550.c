@@ -24,6 +24,8 @@
 //How many files can there be in one directory?
 #define MAX_FILES_IN_DIR (BLOCK_SIZE - sizeof(int)) / ((MAX_FILENAME + 1) + (MAX_EXTENSION + 1) + sizeof(size_t) + sizeof(long))
 
+int filesystem_initialized = 0;
+
 //The attribute packed means to not align these things
 struct cs1550_directory_entry
 {
@@ -39,7 +41,7 @@ struct cs1550_directory_entry
 	} __attribute__((packed)) files[MAX_FILES_IN_DIR];	//There is an array of these
 
 	//This is some space to get this to be exactly the size of the disk block.
-	//Don't use it for anything.  
+	//Don't use it for anything.
 	char padding[BLOCK_SIZE - MAX_FILES_IN_DIR * sizeof(struct cs1550_file_directory) - sizeof(int)];
 } ;
 
@@ -58,7 +60,7 @@ struct cs1550_root_directory
 	} __attribute__((packed)) directories[MAX_DIRS_IN_ROOT];	//There is an array of these
 
 	//This is some space to get this to be exactly the size of the disk block.
-	//Don't use it for anything.  
+	//Don't use it for anything.
 	char padding[BLOCK_SIZE - MAX_DIRS_IN_ROOT * sizeof(struct cs1550_directory) - sizeof(int)];
 } ;
 
@@ -70,7 +72,7 @@ typedef struct cs1550_directory_entry cs1550_directory_entry;
 
 struct cs1550_disk_block
 {
-	//The next disk block, if needed. This is the next pointer in the linked 
+	//The next disk block, if needed. This is the next pointer in the linked
 	//allocation list
 	long nNextBlock;
 
@@ -81,18 +83,31 @@ struct cs1550_disk_block
 
 typedef struct cs1550_disk_block cs1550_disk_block;
 
+static int check_fs_initialization();
+static int initialize_filesystem();
+
+
 /*
  * Called whenever the system wants to know the file attributes, including
- * simply whether the file exists or not. 
+ * simply whether the file exists or not.
  *
  * man -s 2 stat will show the fields of a stat structure
  */
 static int cs1550_getattr(const char *path, struct stat *stbuf)
 {
+	/*if (check_fs_initialization() != 0) {
+		initialize_filesystem();
+	}*/
+	if (filesystem_initialized == 0) {
+		initialize_filesystem();
+	}
+
 	int res = 0;
+	char* directory, filename, extension;
+	sscanf(path, "/%s[^/]/%s[^.].%s", directory, filename, extension);
 
 	memset(stbuf, 0, sizeof(struct stat));
-   
+
 	//is path the root dir?
 	if (strcmp(path, "/") == 0) {
 		stbuf->st_mode = S_IFDIR | 0755;
@@ -100,7 +115,7 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 	} else {
 
 	//Check if name is subdirectory
-	/* 
+	/*
 		//Might want to return a structure with these fields
 		stbuf->st_mode = S_IFDIR | 0755;
 		stbuf->st_nlink = 2;
@@ -110,7 +125,7 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 	//Check if name is a regular file
 	/*
 		//regular file, probably want to be read and write
-		stbuf->st_mode = S_IFREG | 0666; 
+		stbuf->st_mode = S_IFREG | 0666;
 		stbuf->st_nlink = 1; //file links
 		stbuf->st_size = 0; //file size - make sure you replace with real size!
 		res = 0; // no error
@@ -122,7 +137,7 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 	return res;
 }
 
-/* 
+/*
  * Called whenever the contents of a directory are desired. Could be from an 'ls'
  * or could even be when a user hits TAB to do autocompletion
  */
@@ -143,6 +158,8 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	//read the fuse.h file for a description (in the ../include dir)
 	filler(buf, ".", NULL, 0);
 	filler(buf, "..", NULL, 0);
+	filler(buf, "testfiller", NULL, 0);
+	printf("cs1550_readdir()...\n");
 
 	/*
 	//add the user stuff (subdirs or files)
@@ -152,10 +169,15 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	return 0;
 }
 
-/* 
+/*
  * Creates a directory. We can ignore mode since we're not dealing with
  * permissions, as long as getattr returns appropriate ones for us.
  */
+ /** JR NOTE: In this function we can check to see if the root
+ * directory has been initialized. If not, we can initialize it and initialized
+ *  the damn free space tracker. Because our root directory only contains
+ *  subdirectories, users will call mkdir before creating any files. this
+ *  is an appropriate time to initialize if not initialized **/
 static int cs1550_mkdir(const char *path, mode_t mode)
 {
 	(void) path;
@@ -164,7 +186,7 @@ static int cs1550_mkdir(const char *path, mode_t mode)
 	return 0;
 }
 
-/* 
+/*
  * Removes a directory.
  */
 static int cs1550_rmdir(const char *path)
@@ -173,7 +195,31 @@ static int cs1550_rmdir(const char *path)
     return 0;
 }
 
-/* 
+static int initialize_filesystem() {
+	int r = 0;
+	char* filename = "./cs1550.disk";
+	FILE *fs = fopen(filename, "rb+");
+	if (fs == NULL) {
+		int err = errno;
+		r = 1;
+		printf("initialize_filesystem(): could not open %s errno: %s\n", filename,strerror(err));
+	} else {
+		/** Create root directory **/
+  	cs1550_root_directory *root = malloc(sizeof(cs1550_root_directory));
+		root->nDirectories = 0;
+		int w = fwrite(root, sizeof(cs1550_root_directory), 1, fs);
+		if (w != 1) printf("initialize_filesystem(): fwrite() failed to write root directory to disk. errno: %s\n", strerror(errno));
+		else printf("initialize_filesystem(): root directory initialized.\n");
+
+		/** Create free space tracker **/
+	}
+
+	if (fs != NULL) fclose(fs);
+	if (r == 0) filesystem_initialized = 1;
+	return r;
+}
+
+/*
  * Does the actual creation of a file. Mode and dev can be ignored.
  *
  */
@@ -194,7 +240,7 @@ static int cs1550_unlink(const char *path)
     return 0;
 }
 
-/* 
+/*
  * Read size bytes from file into buf starting from offset
  *
  */
@@ -217,11 +263,11 @@ static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 	return size;
 }
 
-/* 
+/*
  * Write size bytes from buf into file starting from offset
  *
  */
-static int cs1550_write(const char *path, const char *buf, size_t size, 
+static int cs1550_write(const char *path, const char *buf, size_t size,
 			  off_t offset, struct fuse_file_info *fi)
 {
 	(void) buf;
@@ -238,6 +284,35 @@ static int cs1550_write(const char *path, const char *buf, size_t size,
 	return size;
 }
 
+static int check_fs_initialization() {
+	int r = 0;
+	int err;
+	char* filename = "./cs1550.disk";
+	FILE *fs = fopen(filename, "rb");
+	struct cs1550_root_directory;
+	cs1550_root_directory *root_dir=malloc(sizeof(root_dir));
+	if (fs == 0) {
+		err = errno;
+		r = -1;
+		printf("check_fs_initialization(): could not open %s errno: %s\n", filename,strerror(err));
+	} else {
+		if (fread(root_dir, sizeof(root_dir), 1, fs) != 1) {
+			err = errno;
+			r = -1;
+			printf("check_fs_initialization(): could not read root struct from %s errno: %s\n", filename,strerror(err));
+		} else {
+			if (&root_dir == NULL) {
+				r = -1; // i don't think this actually checks the struct correctly
+				printf("check_fs_initialization(): root directory of filesystem is not initialized.\n");
+		}
+		}
+	}
+
+	if (fs != NULL) fclose(fs);
+	return r;
+
+}
+
 /******************************************************************************
  *
  *  DO NOT MODIFY ANYTHING BELOW THIS LINE
@@ -246,7 +321,7 @@ static int cs1550_write(const char *path, const char *buf, size_t size,
 
 /*
  * truncate is called when a new file is created (with a 0 size) or when an
- * existing file is made shorter. We're not handling deleting files or 
+ * existing file is made shorter. We're not handling deleting files or
  * truncating existing ones, so all we need to do here is to initialize
  * the appropriate directory entry.
  *
@@ -260,7 +335,7 @@ static int cs1550_truncate(const char *path, off_t size)
 }
 
 
-/* 
+/*
  * Called when we open a file
  *
  */
@@ -275,7 +350,7 @@ static int cs1550_open(const char *path, struct fuse_file_info *fi)
 
     //It's not really necessary for this project to anything in open
 
-    /* We're not going to worry about permissions for this project, but 
+    /* We're not going to worry about permissions for this project, but
 	   if we were and we don't have them to the file we should return an error
 
         return -EACCES;
@@ -286,7 +361,7 @@ static int cs1550_open(const char *path, struct fuse_file_info *fi)
 
 /*
  * Called when close is called on a file descriptor, but because it might
- * have been dup'ed, this isn't a guarantee we won't ever need the file 
+ * have been dup'ed, this isn't a guarantee we won't ever need the file
  * again. For us, return success simply to avoid the unimplemented error
  * in the debug log.
  */
