@@ -128,11 +128,6 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 	}
 	printf("cs1550_getattr(): Extracted root node from .disk file. Number of subdirectories: %i\n", root_dir->nDirectories);
 
- /** TEST CODE. REMOVE! **/
-	strcpy(root_dir->directories[0].dname, "testdirectory");
-	root_dir->nDirectories = 1;
- /**/
-
 	int res = 0;
 	int i = 0;
 	char extension[10];
