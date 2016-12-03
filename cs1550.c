@@ -274,13 +274,19 @@ static int cs1550_mkdir(const char *path, mode_t mode)
 	}
 
 	strcpy(directory_name, path+1);
+	/** Check to see if we need to return an error
+	 *  The check to see if the directory already exists
+	 *  happens below after the root directory is read from disk. **/
 	int seen_root=0;
 	if (strlen(directory_name) > 8) return -ENAMETOOLONG;
+
 	for (i=0;i<strlen(path);i++) {
 		if (path[i] == '/' && seen_root == 0) seen_root = 1;
 		else if (path[i] == '/') return -EPERM;
 	}
 
+
+	/** END primary error checking **/
 	char* filename = "./cs1550.disk";
 	FILE *fs = fopen(filename, "rb+");
 	cs1550_root_directory *root_dir=malloc(sizeof(cs1550_root_directory));
@@ -295,6 +301,11 @@ static int cs1550_mkdir(const char *path, mode_t mode)
 			err = errno;
 			r = -1;
 			printf("cs1550_mkdir(): could not read root struct from %s errno: %s\n", filename,strerror(err));
+		}
+
+		/** Does directory already exist? **/
+		for(i=0;i<MAX_DIRS_IN_ROOT;i++) {
+			if ( strcmp(root_dir->directories[i].dname, directory_name) == 0 ) return -EEXIST;
 		}
 		/** Find somewhere to put the new directory **/
 		int block_num = find_unallocated_block(fs);
