@@ -24,6 +24,10 @@
 //How many files can there be in one directory?
 #define MAX_FILES_IN_DIR (BLOCK_SIZE - sizeof(int)) / ((MAX_FILENAME + 1) + (MAX_EXTENSION + 1) + sizeof(size_t) + sizeof(long))
 
+#define DISKSIZE_IN_BYTES 5242880
+
+#define MAX_NUM_OF_BLOCKS DISKSIZE_IN_BYTES / BLOCK_SIZE
+
 int filesystem_initialized = 0;
 
 //The attribute packed means to not align these things
@@ -83,8 +87,16 @@ struct cs1550_disk_block
 
 typedef struct cs1550_disk_block cs1550_disk_block;
 
+struct cs1550_free_space_tracker {
+	char data[MAX_DATA_IN_BLOCK + 1];
+};
+
+typedef struct cs1550_free_space_tracker cs1550_free_space_tracker;
+
 static int check_fs_initialization();
 static int initialize_filesystem();
+static int find_unallocated_block(FILE *fs);
+static void set_block_allocated(FILE *fs, int block_num);
 
 
 /*
@@ -102,38 +114,108 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 		initialize_filesystem();
 	}
 
+	char* diskfile = "./cs1550.disk";
+	FILE *fs = fopen(diskfile, "rb");
+	struct cs1550_root_directory;
+	cs1550_root_directory *root_dir=malloc(sizeof(root_dir));
+	if (fs == 0) {
+		printf("cs1550_getattr(): could not open %s errno: %s\n", diskfile,strerror(errno));
+	} else {
+		fseek(fs, 0, SEEK_SET); // make sure descriptor is at beginning of file
+		if (fread(root_dir, sizeof(root_dir), 1, fs) != 1) {
+			printf("cs1550_getattr(): could not read root struct from %s errno: %s\n", diskfile,strerror(errno));
+		}
+	}
+	printf("cs1550_getattr(): Extracted root node from .disk file. Number of subdirectories: %i\n", root_dir->nDirectories);
+
+ /** TEST CODE. REMOVE! **/
+	strcpy(root_dir->directories[0].dname, "testdirectory");
+	root_dir->nDirectories = 1;
+ /**/
+
 	int res = 0;
-	char* directory, filename, extension;
+	int i = 0;
+	char extension[10];
+	char filename[10];
+	char directory[25];
+
 	sscanf(path, "/%s[^/]/%s[^.].%s", directory, filename, extension);
+	printf("cs1550_getattr(): getting attributes of path: %s\n", path);
+	printf("cs1550_getattr(): getting attributes of %s/%s.%s\n", directory, filename, extension);
 
 	memset(stbuf, 0, sizeof(struct stat));
 
+
+	int is_subdir = 1;
+	i = 0;
+	while (path[i] != NULL) {
+		if (path[i] == '.') is_subdir = 0;
+		i++;
+	}
 	//is path the root dir?
 	if (strcmp(path, "/") == 0) {
 		stbuf->st_mode = S_IFDIR | 0755;
 		stbuf->st_nlink = 2;
-	} else {
+	} else if (is_subdir) {
+		/** Path denotes a directory. Does directory exist? **/
+			int subdir_exists = 0;
+				for (i=0; i<MAX_DIRS_IN_ROOT; i++) {
+						if ( strcmp(root_dir->directories[i].dname, directory) == 0 ) subdir_exists = 1;
+					}
 
-	//Check if name is subdirectory
-	/*
-		//Might want to return a structure with these fields
-		stbuf->st_mode = S_IFDIR | 0755;
-		stbuf->st_nlink = 2;
-		res = 0; //no error
-	*/
+			if (subdir_exists) printf("cs1550_getattr(): subdirectory %s exists.\n", path);
+			else printf("cs1550_getattr(): subdirectory %s does not exist.\n", path);
 
-	//Check if name is a regular file
-	/*
-		//regular file, probably want to be read and write
-		stbuf->st_mode = S_IFREG | 0666;
-		stbuf->st_nlink = 1; //file links
-		stbuf->st_size = 0; //file size - make sure you replace with real size!
-		res = 0; // no error
-	*/
+			if (subdir_exists) {
+				stbuf->st_mode = S_IFDIR | 0755;
+				stbuf->st_nlink = 2;
+				res = 0;
+			} else res = -ENOENT;
+		}
+	else {
+		/** else it is a file. does file exist? **/
+		int file_exists = 0;
+		/** First look for its directory **/
+		int subdir_exists = 0;
+		int subdir_location_on_disk = 0;
+			for (i=0; i<MAX_DIRS_IN_ROOT; i++) {
+					if ( strcmp(root_dir->directories[i].dname, directory) == 0 ) {
+						subdir_exists = 1;
+						subdir_location_on_disk = root_dir->directories[i].nStartBlock;
+						break;
+					}
+				}
+		/** Now look through the directory for the file. **/
+		int file_size = 0;
+		if (subdir_exists) {
+			/** Get the directory entry from disk **/
 
-		//Else return that path doesn't exist
-		res = -ENOENT;
+			cs1550_directory_entry *dir_entry = malloc(sizeof(cs1550_directory_entry));
+			fseek(fs, subdir_location_on_disk, SEEK_SET);
+			if (fread(dir_entry, sizeof(root_dir), 1, fs) != 1) {
+				printf("cs1550_getattr(): could not read directory entry struct from %s errno: %s\n", diskfile,strerror(errno));
+			} else printf("cs1550_getattr(): loaded directory entry struct from block %i\n", subdir_location_on_disk);
+
+			for (i=0; i<MAX_FILES_IN_DIR; i++) {
+				int f = strcmp(dir_entry->files[i].fname, filename);
+				int e = strcmp(dir_entry->files[i].fext, extension);
+				if ( (e==0) && (f==0) ) {
+					file_exists = 1;
+					file_size = dir_entry->files[i].fsize;
+					break;
+				 }
+			}
+		}
+
+		if (file_exists) {
+			stbuf->st_mode = S_IFREG | 0666;
+			stbuf->st_nlink = 1; //file links
+			stbuf->st_size = file_size;
+			res = 0;
+		} else res = -ENOENT;
 	}
+
+	if (fs != NULL) fclose(fs);
 	return res;
 }
 
@@ -182,8 +264,114 @@ static int cs1550_mkdir(const char *path, mode_t mode)
 {
 	(void) path;
 	(void) mode;
+	int r, w = 0;
+	int err = 0;
+	int i = 0;
+	char directory_name[strlen(path)];
 
-	return 0;
+	if (filesystem_initialized == 0) {
+		initialize_filesystem();
+	}
+
+	strcpy(directory_name, path+1);
+	int seen_root=0;
+	if (strlen(directory_name) > 8) return -ENAMETOOLONG;
+	for (i=0;i<strlen(path);i++) {
+		if (path[i] == '/' && seen_root == 0) seen_root = 1;
+		else if (path[i] == '/') return -EPERM;
+	}
+
+	char* filename = "./cs1550.disk";
+	FILE *fs = fopen(filename, "rb+");
+	cs1550_root_directory *root_dir=malloc(sizeof(cs1550_root_directory));
+	cs1550_directory_entry *new_dir = malloc(sizeof(cs1550_directory_entry));
+	if (fs == 0) {
+		err = errno;
+		r = -1;
+		printf("cs1550_mkdir(): could not open %s errno: %s\n", filename,strerror(err));
+	} else {
+		/** Obtain root directory from disk **/
+		if (fread(root_dir, sizeof(root_dir), 1, fs) != 1) {
+			err = errno;
+			r = -1;
+			printf("cs1550_mkdir(): could not read root struct from %s errno: %s\n", filename,strerror(err));
+		}
+		/** Find somewhere to put the new directory **/
+		int block_num = find_unallocated_block(fs);
+		root_dir->nDirectories++;
+		for(i=0;i<MAX_DIRS_IN_ROOT;i++) {
+			if (root_dir->directories[i].dname[0] == NULL) {
+				strcpy(root_dir->directories[i].dname,directory_name);
+				root_dir->directories[i].nStartBlock = block_num;
+				break;
+			}
+		}
+		/** Set the new directory's block as allocated and write it to disk **/
+		set_block_allocated(fs, block_num);
+		new_dir->nFiles = 0;
+		fseek(fs, BLOCK_SIZE*block_num, SEEK_SET);
+		w = fwrite(new_dir, sizeof(cs1550_directory_entry), 1, fs);
+		if (w != 1) { printf("cs1550_mkdir(): fwrite() failed to write new directory entry to disk. errno: %s\n", strerror(errno)); r = -1;}
+		else printf("cs1550_mkdir(): new directory entry successfully written to disk.\n");
+
+		/** Update root entry **/
+		fseek(fs, 0, SEEK_SET);
+		w = fwrite(root_dir, sizeof(cs1550_root_directory), 1, fs);
+		if (w != 1) { printf("cs1550_mkdir(): fwrite() failed to update root directory on disk. errno: %s\n", strerror(errno)); r = -1;}
+		else printf("cs1550_mkdir(): root directoy successfully updated on disk.\n");
+		/**/
+
+	}
+
+	if (fs!=NULL) fclose(fs);
+
+	return r;
+}
+
+static int find_unallocated_block(FILE *fs) {
+	int r = 0;
+	int unallocated_block = -1;
+	cs1550_free_space_tracker *free_tracker =malloc(sizeof(cs1550_free_space_tracker));
+
+	if (fs == NULL) printf("find_unallocated_block(): fs descriptor is NULL.\n");
+	if (fseek(fs, DISKSIZE_IN_BYTES - BLOCK_SIZE, SEEK_SET) != 0) printf("find_unallocated_block() fseek() failed. errno: %s\n", strerror(errno));
+	if (fread(free_tracker, sizeof(cs1550_free_space_tracker), 1, fs) != 1) {
+			r = -1;
+			printf("find_unallocated_block(): could not read free space tracker from disk errno: %s Location of stream: %i\n",strerror(errno), ftell(fs));
+			if (ferror(fs)!=0) printf("ferror() returned nonzero\n");
+	} else {
+			// look for unallocated block
+			int i;
+			for (i=0; i<MAX_DATA_IN_BLOCK; i++) {
+				if (free_tracker->data[i] == 0) {
+					unallocated_block = i;
+					break;
+				}
+			}
+		}
+
+		printf("find_unallocated_block(): found unallocated block at block %i\n", unallocated_block);
+		return unallocated_block;
+}
+
+static void set_block_allocated(FILE *fs, int block_num) {
+	int r = 0;
+	int w = -1;
+	int unallocated_block = -1;
+
+	cs1550_free_space_tracker *free_tracker =malloc(sizeof(cs1550_free_space_tracker));
+		fseek(fs, DISKSIZE_IN_BYTES - BLOCK_SIZE, SEEK_SET);
+		if (fread(free_tracker, sizeof(free_tracker), 1, fs) != 1) {
+			r = -1;
+			printf("set_block_allocated(): could not read free space tracker from disk errno: %s\n", strerror(errno));
+		} else {
+			// mark block allocated
+			free_tracker->data[block_num] = 1;
+		 fseek(fs, DISKSIZE_IN_BYTES - BLOCK_SIZE, SEEK_SET);
+			w = fwrite(free_tracker, sizeof(cs1550_free_space_tracker), 1, fs);
+			if (w != 1) printf("set_block_allocated(): fwrite() failed to write free space tracker to disk. errno: %s\n", strerror(errno));
+			else printf("set_block_allocated(): free space tracker updated.\n");
+		}
 }
 
 /*
@@ -197,6 +385,7 @@ static int cs1550_rmdir(const char *path)
 
 static int initialize_filesystem() {
 	int r = 0;
+	int w = 0;
 	char* filename = "./cs1550.disk";
 	FILE *fs = fopen(filename, "rb+");
 	if (fs == NULL) {
@@ -207,11 +396,18 @@ static int initialize_filesystem() {
 		/** Create root directory **/
   	cs1550_root_directory *root = malloc(sizeof(cs1550_root_directory));
 		root->nDirectories = 0;
-		int w = fwrite(root, sizeof(cs1550_root_directory), 1, fs);
+		fseek(fs, 0, SEEK_SET);
+		w = fwrite(root, sizeof(cs1550_root_directory), 1, fs);
 		if (w != 1) printf("initialize_filesystem(): fwrite() failed to write root directory to disk. errno: %s\n", strerror(errno));
 		else printf("initialize_filesystem(): root directory initialized.\n");
 
 		/** Create free space tracker **/
+		cs1550_free_space_tracker *free_space = malloc(sizeof(cs1550_free_space_tracker));
+		free_space->data[0] = 1; // show first block as allocated for root
+		fseek(fs, DISKSIZE_IN_BYTES - BLOCK_SIZE, SEEK_SET);
+		w = fwrite(free_space, sizeof(cs1550_free_space_tracker), 1, fs);
+		if (w != 1) printf("initialize_filesystem(): fwrite() failed to write free space tracker to disk. errno: %s\n", strerror(errno));
+		else printf("initialize_filesystem(): free space tracker initialized.\n");
 	}
 
 	if (fs != NULL) fclose(fs);
