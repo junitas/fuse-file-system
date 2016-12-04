@@ -129,6 +129,9 @@ if (fs == 0) {
 
 int res = 0;
 int i = 0;
+/** These sizes are well above what is required
+    to avoid fighting with overruns.
+		Null termination is added appropriately later. **/
 char extension[10];
 char filename[10];
 char directory[25];
