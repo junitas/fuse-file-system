@@ -255,19 +255,21 @@ static int cs1550_mkdir(const char *path, mode_t mode)
 	int r = 0;
 	int err = 0;
 	int i = 0;
-	char directory_name[strlen(path)+1];
+	//char directory_name[strlen(path)+1]; // this doesn't work in sub C99, and may lead to bad buffer overruns
+	char directory_name[MAX_FILENAME+1];
 
 	if (filesystem_initialized == 0) {
 		initialize_filesystem();
 	}
 
-	strcpy(directory_name, path+1);
+//	strcpy(directory_name, path+1); // +1 because of leading slash for root.
+	strncpy(directory_name, path+1, MAX_FILENAME);
 	directory_name[strlen(path)] = "\0";
 	/** Check to see if we need to return an error
 	 *  The check to see if the directory already exists
 	 *  happens below after the root directory is read from disk. **/
 	int seen_root=0;
-	if (strlen(directory_name) > 8) return -ENAMETOOLONG;
+	if (strlen(directory_name) > MAX_FILENAME+1) return -ENAMETOOLONG; // +1 because of root '/''
 
 	for (i=0;i<strlen(path);i++) {
 		if (path[i] == '/' && seen_root == 0) seen_root = 1;
