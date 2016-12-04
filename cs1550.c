@@ -89,7 +89,7 @@ struct cs1550_disk_block
 typedef struct cs1550_disk_block cs1550_disk_block;
 
 struct cs1550_free_space_tracker {
-	char data[MAX_DATA_IN_BLOCK + 1];
+	char data[MAX_FILES_IN_DIR+1];
 };
 
 typedef struct cs1550_free_space_tracker cs1550_free_space_tracker;
@@ -108,14 +108,13 @@ static void set_block_allocated(FILE *fs, int block_num);
 */
 static int cs1550_getattr(const char *path, struct stat *stbuf)
 {
-	/*if (check_fs_initialization() != 0) {
+	if (check_fs_initialization() != 1) {
 	initialize_filesystem();
-}*/
-if (filesystem_initialized == 0) {
-	initialize_filesystem();
+	filesystem_initialized = 1;
 }
 
-char* diskfile = "./cs1550.disk";
+
+char* diskfile = "./.disk";
 FILE *fs = fopen(diskfile, "rb");
 cs1550_root_directory *root_dir=malloc(sizeof(cs1550_root_directory));
 if (fs == 0) {
@@ -249,7 +248,7 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		if (!is_subdir) return -ENOENT;
 
 		// Check if directory exists
-		char* disk_name = "./cs1550.disk";
+		char* disk_name = "./.disk";
 		FILE *fs = fopen(disk_name, "rb");
 		cs1550_root_directory *root_dir=malloc(sizeof(cs1550_root_directory));
 		if (fs == 0) {
@@ -319,10 +318,10 @@ static int cs1550_mkdir(const char *path, mode_t mode)
 	//char directory_name[strlen(path)+1]; // this doesn't work in sub C99, and may lead to bad buffer overruns
 	char directory_name[MAX_FILENAME+1];
 
-	if (filesystem_initialized == 0) {
-		initialize_filesystem();
-	}
-
+	if (check_fs_initialization() != 1) {
+	initialize_filesystem();
+	filesystem_initialized = 1;
+}
 	//	strcpy(directory_name, path+1); // +1 because of leading slash for root.
 	strncpy(directory_name, path+1, MAX_FILENAME);
 	directory_name[strlen(path)] = "\0";
@@ -338,7 +337,7 @@ static int cs1550_mkdir(const char *path, mode_t mode)
 	}
 
 	/** END primary error checking **/
-	char* filename = "./cs1550.disk";
+	char* filename = "./.disk";
 	FILE *fs = fopen(filename, "rb+");
 	cs1550_root_directory *root_dir=malloc(sizeof(cs1550_root_directory));
 	cs1550_directory_entry *new_dir = malloc(sizeof(cs1550_directory_entry));
@@ -466,7 +465,7 @@ static int cs1550_rmdir(const char *path)
 static int initialize_filesystem() {
 	int r = 0;
 	int w = 0;
-	char* filename = "./cs1550.disk";
+	char* filename = "./.disk";
 	FILE *fs = fopen(filename, "rb+");
 	if (fs == NULL) {
 		int err = errno;
@@ -486,14 +485,15 @@ static int initialize_filesystem() {
 		/** Create free space tracker **/
 		cs1550_free_space_tracker *free_space = malloc(sizeof(cs1550_free_space_tracker));
 		free_space->data[0] = 1; // show first block as allocated for root
+		// need to mark as allocated the space used for the tracker!
 		fseek(fs, DISKSIZE_IN_BYTES - BLOCK_SIZE, SEEK_SET);
 		w = fwrite(free_space, sizeof(cs1550_free_space_tracker), 1, fs);
 		if (w != 1) printf("initialize_filesystem(): fwrite() failed to write free space tracker to disk. errno: %s\n", strerror(errno));
-		else printf("initialize_filesystem(): free space tracker initialized.\n");
+		else printf("initialize_filesystem(): free space tracker initialized and written to byte position %i.\n", DISKSIZE_IN_BYTES - BLOCK_SIZE);
 	}
 
 	if (fs != NULL) fclose(fs);
-	if (r == 0) filesystem_initialized = 1;
+
 	return r;
 }
 
@@ -564,25 +564,24 @@ static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 
 		static int check_fs_initialization() {
 			int r = 0;
-			int err;
-			char* filename = "./cs1550.disk";
+			char* filename = "./.disk";
 			FILE *fs = fopen(filename, "rb");
-			struct cs1550_root_directory;
-			cs1550_root_directory *root_dir=malloc(sizeof(cs1550_root_directory));
+			cs1550_free_space_tracker *tracker = malloc(sizeof(cs1550_free_space_tracker));
 			if (fs == 0) {
-				err = errno;
 				r = -1;
-				printf("check_fs_initialization(): could not open %s errno: %s\n", filename,strerror(err));
+				printf("check_fs_initialization(): could not open %s errno: %s\n", filename,strerror(errno));
 			} else {
-				if (fread(root_dir, sizeof(cs1550_root_directory), 1, fs) != 1) {
-					err = errno;
+				fseek(fs, DISKSIZE_IN_BYTES - BLOCK_SIZE, SEEK_SET); //seek to free space tracker
+				if (fread(tracker, sizeof(cs1550_free_space_tracker), 1, fs) != 1) {
 					r = -1;
-					printf("check_fs_initialization(): could not read root struct from %s errno: %s\n", filename,strerror(err));
+					printf("check_fs_initialization(): could not read root struct from %s errno: %s\n", filename,strerror(errno));
 				} else {
-					if (&root_dir == NULL) {
-						r = -1; // i don't think this actually checks the struct correctly
-						printf("check_fs_initialization(): root directory of filesystem is not initialized.\n");
-					}
+					printf("check_fs_initialization(): Checking free space tracker for root initialization.\n");
+					int init = 0;
+					int i;
+					for(i=0;i<MAX_FILES_IN_DIR;i++) if (tracker->data[i] == 1) init = 1;
+					if (init) {printf("check_fs_initialization(): Filesystem found to be initialized.\n"); r = 1; }
+					else printf("check_fs_initialization(): Filesystem found to NOT be initialized.\n");
 				}
 			}
 
