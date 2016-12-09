@@ -135,7 +135,8 @@ char extension[10];
 char filename[10];
 char directory[25];
 
-sscanf(path, "/%s[^/]/%s[^.].%s", directory, filename, extension);
+sscanf(path,  "/%[^/]/%[^.].%s", directory, filename, extension);
+//printf("cs1550_getattr(): Directory: %s Filename: %s Extension %s\n", directory, filename, extension);
 
 memset(stbuf, 0, sizeof(struct stat));
 
@@ -146,35 +147,38 @@ while (path[i] != NULL) {
 	if (path[i] == '.') is_subdir = 0;
 	i++;
 }
+
 //is path the root dir?
 if (strcmp(path, "/") == 0) {
 	stbuf->st_mode = S_IFDIR | 0755;
 	stbuf->st_nlink = 2;
+	printf("cs1550_getattr(): Setting stat structure for root directory.\n");
 } else if (is_subdir) {
 	/** Path denotes a directory. Does directory exist? **/
 	int subdir_exists = 0;
 	for (i=0; i<MAX_DIRS_IN_ROOT; i++) {
-		if ( strcmp(root_dir->directories[i].dname, directory) == 0 ) subdir_exists = 1;
+		if ( strncmp(root_dir->directories[i].dname, directory, 8) == 0 ) subdir_exists = 1;
 	}
 
-
-	if (subdir_exists==1) printf("cs1550_getattr(): subdirectory %s exists.\n", path);
-	else printf("cs1550_getattr(): subdirectory %s does not exist.\n", directory);
+//	if (subdir_exists==1) printf("cs1550_getattr(): subdirectory %s exists.\n", path);
+//	else printf("cs1550_getattr(): subdirectory %s does not exist.\n", directory);
 
 	if (subdir_exists) {
 		stbuf->st_mode = S_IFDIR | 0755;
 		stbuf->st_nlink = 2;
+		printf("cs1550_getattr(): Setting stat structure for subdirectory %s\n", directory);
 		res = 0;
 	} else res = -ENOENT;
 }
 else {
+	printf("cs1550_getattr(): Getting attributes for file %s at path %s\n", filename, path);
 	/** else it is a file. does file exist? **/
 	int file_exists = 0;
 	/** First look for its directory **/
 	int subdir_exists = 0;
 	int subdir_location_on_disk = 0;
 	for (i=0; i<MAX_DIRS_IN_ROOT; i++) {
-		if ( strcmp(root_dir->directories[i].dname, directory) == 0 ) {
+		if ( strncmp(root_dir->directories[i].dname, directory, 8) == 0 ) {
 			subdir_exists = 1;
 			subdir_location_on_disk = root_dir->directories[i].nStartBlock;
 			break;
@@ -184,16 +188,19 @@ else {
 	int file_size = 0;
 	if (subdir_exists) {
 		/** Get the directory entry from disk **/
-
+		printf("cs1550_getattr(): Found subdirectory that the file is in..\n");
 		cs1550_directory_entry *dir_entry = malloc(sizeof(cs1550_directory_entry));
-		fseek(fs, subdir_location_on_disk, SEEK_SET);
+		fseek(fs, subdir_location_on_disk*BLOCK_SIZE, SEEK_SET);
 		if (fread(dir_entry, sizeof(cs1550_directory_entry), 1, fs) != 1) {
 			printf("cs1550_getattr(): could not read directory entry struct from %s errno: %s\n", diskfile,strerror(errno));
 		} else printf("cs1550_getattr(): loaded directory entry struct from block %i\n", subdir_location_on_disk);
 
 		for (i=0; i<MAX_FILES_IN_DIR; i++) {
-			int f = strcmp(dir_entry->files[i].fname, filename);
-			int e = strcmp(dir_entry->files[i].fext, extension);
+			if (dir_entry->files[i].fname != NULL) {
+				printf("cs1550_getattr(): comparing %s and %s\n", dir_entry->files[i].fname, filename);
+			}
+			int f = strncmp(dir_entry->files[i].fname, filename, 8);
+			int e = strncmp(dir_entry->files[i].fext, extension, 3);
 			if ( (e==0) && (f==0) ) {
 				file_exists = 1;
 				file_size = dir_entry->files[i].fsize;
@@ -207,6 +214,7 @@ else {
 		stbuf->st_nlink = 1; //file links
 		stbuf->st_size = file_size;
 		res = 0;
+		printf("cs1550_getattr(): Setting stat structure for file %s.%s\n", filename, extension);
 	} else res = -ENOENT;
 }
 
@@ -232,7 +240,7 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		char filename[10];
 		char directory[25];
 
-		sscanf(path, "/%s[^/]/%s[^.].%s", directory, filename, extension);
+		sscanf(path, "/%[^/]/%[^.].%s", directory, filename, extension);
 
 		printf("cs1550_readdir(): attempting to list contents of %s\n", path);
 		// Is path valid?
@@ -291,8 +299,16 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			}
 
 			// List all files in directory
+			char path_to_display[MAX_FILENAME + MAX_EXTENSION + 1 + 1];
+			memset(path_to_display, 0, MAX_FILENAME + MAX_EXTENSION + 2);
 			for(i=0;i<MAX_FILES_IN_DIR;i++) {
-				if (dir_entry->files[i].fname != NULL) filler(buf, dir_entry->files[i].fname, NULL, 0);
+				if (dir_entry->files[i].fname[0] != NULL) {
+					strncat(path_to_display, dir_entry->files[i].fname, 8);
+					strncat(path_to_display, ".", 1);
+					strncat(path_to_display, dir_entry->files[i].fext, 3);
+				filler(buf, path_to_display, NULL, 0);
+			}
+			memset(path_to_display, 0, MAX_FILENAME + MAX_EXTENSION + 2);
 			}
 
 		}
@@ -390,6 +406,7 @@ static int cs1550_mkdir(const char *path, mode_t mode)
 		set_block_allocated(fs, block_num);
 		assert(r==0);
 		new_dir->nFiles = 0;
+		for(i=0;i<MAX_FILES_IN_DIR;i++) new_dir->files[i].fname[0] = '\0'; // zero out all filenames in new directory
 		assert(block_num != 0);
 		fseek(fs, BLOCK_SIZE*block_num, SEEK_SET);
 		printf("cs1550_mkdir(): writing new directory entry to byte position %i\n", BLOCK_SIZE*block_num);
@@ -505,6 +522,87 @@ static int cs1550_mknod(const char *path, mode_t mode, dev_t dev)
 {
 	(void) mode;
 	(void) dev;
+
+	/** These sizes are well above what is required
+	    to avoid fighting with overruns.
+			Null termination is added appropriately later. **/
+	char extension[10];
+	char filename[10];
+	char directory[25];
+
+	sscanf(path, "/%[^/]/%[^.].%s", directory, filename, extension);
+
+	/** Check filename length **/
+	if ( strnlen(filename, 9) > 8 || strnlen(extension, 4) > 3 ) {
+		printf("cs1550_mknod(): filename or extension for %s too long.\n", path);
+		return -ENAMETOOLONG;
+	}
+	/** Check if file creation is happening in root directory **/
+	int in_root = 1;
+	int i = 0;
+	for(i=1;i<strlen(path);i++) if ( path[i] == '/' ) in_root = 0;
+	if (in_root == 1) {
+		printf("cs1550_mknod(): file at path %s being created in root directory.\n", path);
+		return -EPERM;
+	}
+
+	/** Check if the file already exists
+			If it doesn't, create it.    **/
+	char* diskname = "./.disk";
+	FILE *fs = fopen(diskname, "rb+");
+	cs1550_root_directory *root_dir=malloc(sizeof(cs1550_root_directory));
+	cs1550_directory_entry *dir = malloc(sizeof(cs1550_directory_entry));
+	assert(fs != 0);
+	if (fs == 0) {
+		printf("cs1550_mknod(): could not open %s errno: %s\n", diskname,strerror(errno));
+	} else {
+		int dir_location = -1;
+		if ( fread(root_dir, sizeof(cs1550_root_directory), 1, fs) != 1 ) printf("cs1550_mknod(): Could not read root directory from disk.\n");
+		/** Find the directory that this file would be in **/
+		for(i=0; i<MAX_DIRS_IN_ROOT; i++) {
+			dir_location = root_dir->directories[i].nStartBlock;
+			if ( strncmp(root_dir->directories[i].dname, directory, 8) == 0 ) break;
+		}
+		/** Directory that the file is in has been found **/
+		fseek(fs, dir_location*BLOCK_SIZE, SEEK_SET);
+		if ( fread(dir, sizeof(cs1550_directory_entry), 1, fs) != 1 ) printf("cs1550_mknod(): Could not read directory from disk.\n");
+		int file_exists = 0;
+		for(i=0; i<MAX_FILES_IN_DIR; i++) {
+			if ( strncmp(filename, dir->files[i].fname, 8) == 0 && strncmp(extension, dir->files[i].fext, 3) == 0 ) return -EEXIST;
+		}
+
+		/** Directory has been searched, file has not been found.
+				Create the file. **/
+		int block_to_write = find_unallocated_block(fs);
+		set_block_allocated(fs, block_to_write);
+		/** Edit and write directory structure **/
+		fseek(fs, dir_location*BLOCK_SIZE, SEEK_SET);
+		dir->nFiles++;
+		for(i=0;i<MAX_FILES_IN_DIR;i++) if (dir->files[i].fname[0] == NULL) break;
+		strncpy(dir->files[i].fname, filename, 8);
+		strncpy(dir->files[i].fext, extension, 3);
+	//	dir->files[i].fname[MAX_FILENAME] = '\0';
+	//	dir->files[i].fext[MAX_EXTENSION] = '\0';
+		dir->files[i].fsize = 0;
+		dir->files[i].nStartBlock = block_to_write;
+		printf("cs1550_mknod(): updating directory entry with filename %s.%s to byte location %i\n", dir->files[i].fname, dir->files[i].fext, dir_location*BLOCK_SIZE);
+		int w = fwrite(dir, sizeof(cs1550_directory_entry), 1, fs);
+		if (w!=1) printf("cs1550_mknod(): fwrite failed to write updated directory entry to disk.\n");
+
+		/** Create and write new file structure **/
+		cs1550_disk_block *new_file=malloc(sizeof(cs1550_disk_block));
+		memset(new_file->data, 5, MAX_DATA_IN_BLOCK);
+		new_file->nNextBlock = -1;
+
+		fseek(fs, block_to_write*BLOCK_SIZE, SEEK_SET);
+		w = fwrite(new_file, sizeof(cs1550_disk_block), 1, fs);
+		if (w!=1) printf("cs1550_mknod(): fwrite failed to write new file entry to disk.\n");
+		else printf("cs1550_mknod(): Wrote new file entry to disk.\n");
+
+	}
+
+	if (fs!=NULL) fclose(fs);
+	printf("cs1550_mknod(): Returning success from function.\n");
 	return 0;
 }
 
@@ -576,11 +674,10 @@ static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 					r = -1;
 					printf("check_fs_initialization(): could not read root struct from %s errno: %s\n", filename,strerror(errno));
 				} else {
-					printf("check_fs_initialization(): Checking free space tracker for root initialization.\n");
 					int init = 0;
 					int i;
 					for(i=0;i<MAX_FILES_IN_DIR;i++) if (tracker->data[i] == 1) init = 1;
-					if (init) {printf("check_fs_initialization(): Filesystem found to be initialized.\n"); r = 1; }
+					if (init) { r = 1; }
 					else printf("check_fs_initialization(): Filesystem found to NOT be initialized.\n");
 				}
 			}
