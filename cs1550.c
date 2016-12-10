@@ -725,14 +725,35 @@ static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 				offset could be either.                                   **/
 			  if (need_new_block == 0) {
 					printf("cs1550_write(): Do not need to create new block. Writing data to file block %i.\n", next_block);
-					printf("cs1550_write(): bytes_until_at_offset: %i\n", bytes_until_at_offset);
 					memcpy(&curr_block->data[bytes_until_at_offset], buf, size);
-					printf("cs1550_write(): memcpy returned\n");
 
 					int w = fwrite(curr_block, sizeof(cs1550_disk_block), 1, fs);
 					if (w!=1) printf("cs1550_write(): Writing data to file block %i failed.\n", next_block);
 					else printf("cs1550_write(): File data written to disk block %i.\n", next_block);
 				}
+			/** END OF FIRST CASE **/
+
+	/** SECOND CASE: The write needs a new block.
+	Even if the offset is at beginning of file.
+	 If this is the case, curr_block should already
+	point to the last allocated block of the file. **/
+	if (need_new_block == 1) {
+		printf("cs1550_write(): Need to create a new block. Filling in remaining space in current block.\n");
+		int bytes_remaining_to_write = size;
+		int new_block_number = find_unallocated_block(fs);// get a new block
+		set_block_allocated(fs, new_block_number);// set that block as allocated
+		curr_block->nNextBlock = new_block_number;
+		/** First, we have to fill up the current block's data segment **/
+		memcpy(&curr_block->data[bytes_until_at_offset], buf, MAX_DATA_IN_BLOCK - bytes_until_at_offset);
+		fseek(fs, next_block*BLOCK_SIZE, SEEK_SET);
+		printf("cs1550_write(): memcpy writing %i bytes\n", MAX_DATA_IN_BLOCK - bytes_until_at_offset);
+		int w = fwrite(curr_block, sizeof(cs1550_disk_block), 1, fs);
+		if (w!=1) printf("cs1550_write(): Writing data to file block %i failed.\n", next_block);
+		else printf("cs1550_write(): File data written to disk block %i.\n", next_block);
+		/** END WRITE **/
+		/** Now we must write new blocks **/
+		printf("cs1550_write(): Preparing to append new blocks to file.\n");
+	}
 
 
 		/** If not an append, handle the easy case. **/
