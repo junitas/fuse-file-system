@@ -591,7 +591,7 @@ static int cs1550_mknod(const char *path, mode_t mode, dev_t dev)
 
 		/** Create and write new file structure **/
 		cs1550_disk_block *new_file=malloc(sizeof(cs1550_disk_block));
-		memset(new_file->data, 5, MAX_DATA_IN_BLOCK);
+		memset(new_file->data, 0, MAX_DATA_IN_BLOCK);
 		new_file->nNextBlock = -1;
 
 		fseek(fs, block_to_write*BLOCK_SIZE, SEEK_SET);
@@ -651,12 +651,139 @@ static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 			(void) fi;
 			(void) path;
 
-			//check to make sure path exists
-			//check that size is > 0
-			//check that offset is <= to the file size
-			//write data
-			//set size (should be same as input) and return, or error
+			/** These sizes are well above what is required
+					to avoid fighting with overruns.
+					Null termination is added appropriately later. **/
+			char extension[10];
+			char filename[10];
+			char directory[25];
+			int directory_exists = 0;
+			int file_exists = 0;
+			int file_size, file_start_block = -1;
 
+			sscanf(path, "/%[^/]/%[^.].%s", directory, filename, extension);
+
+			char* diskname = "./.disk";
+			FILE *fs = fopen(diskname, "rb+");
+			cs1550_root_directory *root_dir=malloc(sizeof(cs1550_root_directory));
+			cs1550_directory_entry *dir = malloc(sizeof(cs1550_directory_entry));
+			cs1550_disk_block *curr_block = malloc(sizeof(cs1550_disk_block));
+			assert(fs != 0);
+
+			/** Find File **/
+			int dir_location = -1;
+			if ( fread(root_dir, sizeof(cs1550_root_directory), 1, fs) != 1 ) printf("cs1550_write(): Could not read root directory from disk.\n");
+			/** Find the directory that this file would be in **/
+			int i;
+			for(i=0; i<MAX_DIRS_IN_ROOT; i++) {
+				dir_location = root_dir->directories[i].nStartBlock;
+				if ( strncmp(root_dir->directories[i].dname, directory, 8) == 0 ){ directory_exists = 1; break; }
+			}
+			if (directory_exists) {
+			/** Directory that the file is in has been found **/
+			fseek(fs, dir_location*BLOCK_SIZE, SEEK_SET);
+			if ( fread(dir, sizeof(cs1550_directory_entry), 1, fs) != 1 ) printf("cs1550_write(): Could not read directory from disk.\n");
+			for(i=0; i<MAX_FILES_IN_DIR; i++) {
+				if ( strncmp(filename, dir->files[i].fname, 8) == 0 && strncmp(extension, dir->files[i].fext, 3) == 0 ){
+					file_size = dir->files[i].fsize;
+					file_exists = 1;
+					file_start_block = (int)dir->files[i].nStartBlock;
+				}
+			}
+		}
+		if (directory_exists == 0 || file_exists == 0) { printf("cs1550_write(): Directory or file does not exist.\n"); return -1; }
+		if (size <= 0 || offset > file_size) { printf("cs1550_write(): Size <= 0 or offset > file_size. Size: %i Offset: %i File Size: %i\n", size, offset, file_size); return -1;}
+
+		/** Error checking done, now retrieve file's first block **/
+		int next_block = file_start_block;
+		printf("cs1550_write(): File to write to is located at block %i\n", file_start_block);
+		fseek(fs, file_start_block*BLOCK_SIZE, SEEK_SET);
+		if ( fread(curr_block, sizeof(cs1550_disk_block), 1, fs) != 1 ) printf("cs1550_write(): Could not read first disk block from disk.\n");
+		/** END RETRIEVING FILE'S FIRST BLOCK **/
+
+
+
+		/** Find the block of the file that the offset points to **/
+		int bytes_until_at_offset = (int)offset;
+		while ((int)bytes_until_at_offset > (int)MAX_DATA_IN_BLOCK) {
+				printf("cs1550_write(): bytes_left_to_travel > MAX_DATA_IN_BLOCK. bytes_until_at_offset: %i MAX_DATA_IN_BLOCK: %i\n", bytes_until_at_offset, MAX_DATA_IN_BLOCK);
+				next_block = (int)curr_block->nNextBlock;
+				fseek(fs, next_block*BLOCK_SIZE, SEEK_SET);
+				if ( fread(curr_block, sizeof(cs1550_disk_block), 1, fs) != 1 ) printf("cs1550_write(): Could not read %i'th disk block from disk.\n", next_block);
+				bytes_until_at_offset = bytes_until_at_offset-(int)MAX_DATA_IN_BLOCK;
+		}
+		/** END RETRIEVAL OF BLOCK **/
+
+		/** We should have the block that will have a write occur.
+				First, we need to figure out whether the write will
+				fit within one block. **/
+				int need_new_block = 0;
+				if ( (int)(size + bytes_until_at_offset) > (int)MAX_DATA_IN_BLOCK) need_new_block = 1;
+
+		/** FIRST CASE: Can perform the write without needing a new block.
+		 		Does not differentiate between "appends" and writes, since
+				offset could be either.                                   **/
+			  if (need_new_block == 0) {
+					printf("cs1550_write(): Do not need to create new block. Writing data to file block %i.\n", next_block);
+					printf("cs1550_write(): bytes_until_at_offset: %i\n", bytes_until_at_offset);
+					memcpy(&curr_block->data[bytes_until_at_offset], buf, size);
+					printf("cs1550_write(): memcpy returned\n");
+
+					int w = fwrite(curr_block, sizeof(cs1550_disk_block), 1, fs);
+					if (w!=1) printf("cs1550_write(): Writing data to file block %i failed.\n", next_block);
+					else printf("cs1550_write(): File data written to disk block %i.\n", next_block);
+				}
+
+
+		/** If not an append, handle the easy case. **/
+	/*	if (!is_append) {
+		printf("cs1550_write(): Writing non-appended data to file block %i. bytes_left_to_travel: %i size: %i\n", next_block, bytes_left_to_travel, size);
+		memcpy(curr_block->data[bytes_left_to_travel], buf, size);
+		printf("cs1550_write(): Memcpy returned.\n");
+	  int w = fwrite(curr_block, sizeof(cs1550_disk_block), 1, fs);
+		if (w!=1) printf("cs1550_write(): Writing non-appended file block failed.\n");
+		else printf("cs1550_write(): Non-appended file data written to disk.\n");
+	}*/
+
+
+	/**** BELOW THIS LINE IS APPEND LOGIC *****/
+/**
+	/** Handle append, writing each block (including current) to disk **/
+	/*
+	int w = -1;
+	int remaining_bytes_to_write = size;
+	int offset_in_this_block = bytes_left_to_travel;
+	int offset_in_buffer = 0;
+	room_left_in_block = MAX_DATA_IN_BLOCK - offset_in_this_block;
+
+	if (is_append) {
+		printf("cs1550_write(): Writing appended data to file block %i\n", next_block);
+		/** Write the rest of this block's data.. **/
+	/*	memcpy(curr_block->data[offset_in_this_block], buf[offset_in_buffer], room_left_in_block);
+		int new_block_location = find_unallocated_block(fs);
+		set_block_allocated(fs, new_block_location);
+		curr_block->nNextBlock = (long)new_block_location;
+		w = fwrite(curr_block, sizeof(cs1550_disk_block), 1, fs);
+		if (w!=1) printf("cs1550_write(): Writing appended file block failed.");
+		remaining_bytes_to_write = remaining_bytes_to_write - room_left_in_block;
+
+		/** Begin writing new blocks **/
+	/*	while (remaining_bytes_to_write > 0) {
+		printf("cs1550_write(): Writing nappended data to overrun file block %i\n", new_block_location);
+		offset_in_this_block = 0; // all new blocks have offset = 0..
+		room_left_in_block = MAX_DATA_IN_BLOCK - offset_in_this_block;
+		curr_block = malloc(sizeof(cs1550_disk_block));
+		memcpy(curr_block->data[offset_in_this_block], buf[offset_in_buffer], room_left_in_block);
+
+
+		}
+		/** END APPEND WHILE **/
+
+//	}
+
+
+			//set size (should be same as input) and return, or error
+			if (fs!=NULL) fclose(fs);
 			return size;
 		}
 
