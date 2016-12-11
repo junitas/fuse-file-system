@@ -287,8 +287,11 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			if (root_dir->directories[i].dname == NULL) continue;
 			if ( strcmp(root_dir->directories[i].dname, directory) == 0 ) { subdir_exists = 1; subdir_location_on_disk = root_dir->directories[i].nStartBlock; }
 		}
-		if (!subdir_exists){ printf("cs1550_readdir(): could not find subdirectory %s\n", directory); return -ENOENT; }
-		else {
+		if (!subdir_exists){
+			printf("cs1550_readdir(): could not find subdirectory %s\n", directory);
+			if (fs!=NULL) fclose(fs);
+			 return -ENOENT;
+		} else {
 			//List suddirectory's contents
 
 			/** Get directory entry **/
@@ -377,7 +380,7 @@ static int cs1550_mkdir(const char *path, mode_t mode)
 		assert(r==0);
 		/** Does directory already exist? **/
 		for(i=0;i<MAX_DIRS_IN_ROOT;i++) {
-			if ( strcmp(root_dir->directories[i].dname, directory_name) == 0 ) return -EEXIST;
+			if ( strcmp(root_dir->directories[i].dname, directory_name) == 0 ) { if (fs!=NULL) fclose(fs); return -EEXIST; }
 		}
 		/** Find somewhere to put the new directory **/
 		int block_num = find_unallocated_block(fs);
@@ -568,7 +571,10 @@ static int cs1550_mknod(const char *path, mode_t mode, dev_t dev)
 		if ( fread(dir, sizeof(cs1550_directory_entry), 1, fs) != 1 ) printf("cs1550_mknod(): Could not read directory from disk.\n");
 		int file_exists = 0;
 		for(i=0; i<MAX_FILES_IN_DIR; i++) {
-			if ( strncmp(filename, dir->files[i].fname, 8) == 0 && strncmp(extension, dir->files[i].fext, 3) == 0 ) return -EEXIST;
+			if ( strncmp(filename, dir->files[i].fname, 8) == 0 && strncmp(extension, dir->files[i].fext, 3) == 0 ) {
+			if (fs!=NULL) fclose(fs);
+			return -EEXIST;
+		}
 		}
 
 		/** Directory has been searched, file has not been found.
@@ -623,10 +629,68 @@ static int cs1550_unlink(const char *path)
 static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 	struct fuse_file_info *fi)
 	{
+		printf("cs1550_read() called on %s\n", path);
 		(void) buf;
 		(void) offset;
 		(void) fi;
 		(void) path;
+
+		/** These sizes are well above what is required
+				to avoid fighting with overruns.
+				Null termination is added appropriately later. **/
+		char extension[10];
+		char filename[10];
+		char directory[25];
+
+		sscanf(path, "/%[^/]/%[^.].%s", directory, filename, extension);
+
+		/** Is path a directory? **/
+		int i;
+		int is_dir = 1;
+		for(i=0;i<strlen(path);i++){
+			if (path[i] == '.') {
+				is_dir = 0;
+				break;
+			}
+		}
+		if (is_dir){ printf("cs1550_read(): Path is a directory.\n"); return -EISDIR; }
+		if (size <=0) { printf("cs1550_read(): Size <= 0.\n"); return -1; }
+		/*********************/
+		/** Open filesystem, try to find file **/
+		char* diskname = "./.disk";
+		FILE *fs = fopen(diskname, "rb");
+		cs1550_root_directory *root_dir=malloc(sizeof(cs1550_root_directory));
+		cs1550_directory_entry *dir = malloc(sizeof(cs1550_directory_entry));
+		assert(fs != 0);
+
+		/** GET ROOT **/
+		fseek(fs, 0, SEEK_SET);
+		if ( fread(root_dir, sizeof(cs1550_root_directory), 1, fs) != 1 ) printf("cs1550_read(): Could not read root directory from disk.\n");
+		/** GET DIRECTORY **/
+		int dir_location = -1;
+		for(i=0; i<MAX_DIRS_IN_ROOT; i++) {
+			dir_location = root_dir->directories[i].nStartBlock;
+			if ( strncmp(root_dir->directories[i].dname, directory, 8) == 0 ) break;
+		}
+		printf("cs1550_read(): Found directory %s at block %i\n", directory, dir_location);
+		fseek(fs, BLOCK_SIZE*dir_location, SEEK_SET);
+		if ( fread(dir, sizeof(cs1550_directory_entry), 1, fs) != 1 ) printf("cs1550_read(): Could not read directory from disk.\n");
+
+		/** FIND FILE **/
+		int file_start_block = -1;
+		int file_size = -1;
+		for(i=0; i<MAX_FILES_IN_DIR; i++) {
+			if ( strncmp(filename, dir->files[i].fname, 8) == 0 && strncmp(extension, dir->files[i].fext, 3) == 0 ){
+				file_size = dir->files[i].fsize;
+				file_start_block = (int)dir->files[i].nStartBlock;
+			}
+		}
+		printf("cs1550_read(): Found file %s.%s at block %i\n", filename, extension, file_start_block);
+		if (offset > file_size) {
+			printf("cs1550_read(): offset > file_size.\n");
+			if (fs!=NULL) fclose(fs);
+			return -1;
+		}
 
 		//check to make sure path exists
 		//check that size is > 0
@@ -691,8 +755,8 @@ static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 				}
 			}
 		}
-		if (directory_exists == 0 || file_exists == 0) { printf("cs1550_write(): Directory or file does not exist.\n"); return -1; }
-		if (size <= 0 || offset > file_size) { printf("cs1550_write(): Size <= 0 or offset > file_size. Size: %i Offset: %i File Size: %i\n", size, offset, file_size); return -1;}
+		if (directory_exists == 0 || file_exists == 0) { printf("cs1550_write(): Directory or file does not exist.\n"); if (fs!=NULL) fclose(fs); return -1; }
+		if (size <= 0 || offset > file_size) { printf("cs1550_write(): Size <= 0 or offset > file_size. Size: %i Offset: %i File Size: %i\n", size, offset, file_size); if (fs!=NULL) fclose(fs); return -1;}
 
 		/** Error checking done, now retrieve file's first block **/
 		int next_block = file_start_block;
