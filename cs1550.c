@@ -723,7 +723,7 @@ static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 			char directory[25];
 			int directory_exists = 0;
 			int file_exists = 0;
-			int file_size, file_start_block = -1;
+			int file_size, file_start_block, file_index_in_directory_entry = -1;
 
 			sscanf(path, "/%[^/]/%[^.].%s", directory, filename, extension);
 
@@ -733,6 +733,7 @@ static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 			cs1550_directory_entry *dir = malloc(sizeof(cs1550_directory_entry));
 			cs1550_disk_block *curr_block = malloc(sizeof(cs1550_disk_block));
 			assert(fs != 0);
+
 
 			/** Find File **/
 			int dir_location = -1;
@@ -751,20 +752,25 @@ static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 				if ( strncmp(filename, dir->files[i].fname, 8) == 0 && strncmp(extension, dir->files[i].fext, 3) == 0 ){
 					file_size = dir->files[i].fsize;
 					file_exists = 1;
+					file_index_in_directory_entry = i;
 					file_start_block = (int)dir->files[i].nStartBlock;
 				}
 			}
 		}
 		if (directory_exists == 0 || file_exists == 0) { printf("cs1550_write(): Directory or file does not exist.\n"); if (fs!=NULL) fclose(fs); return -1; }
 		if (size <= 0 || offset > file_size) { printf("cs1550_write(): Size <= 0 or offset > file_size. Size: %i Offset: %i File Size: %i\n", size, offset, file_size); if (fs!=NULL) fclose(fs); return -1;}
-
+		printf("cs1550_write(): offset: %i size: %i file_size: %i\n", offset, size, file_size);
 		/** Error checking done, now retrieve file's first block **/
 		int next_block = file_start_block;
 		printf("cs1550_write(): File to write to is located at block %i\n", file_start_block);
 		fseek(fs, file_start_block*BLOCK_SIZE, SEEK_SET);
 		if ( fread(curr_block, sizeof(cs1550_disk_block), 1, fs) != 1 ) printf("cs1550_write(): Could not read first disk block from disk.\n");
 		/** END RETRIEVING FILE'S FIRST BLOCK **/
-
+		/** UPDATE FILE'S DIR ENTRY WITH NEW SIZE **/
+		dir->files[file_index_in_directory_entry].fsize = dir->files[file_index_in_directory_entry].fsize + size;
+		fseek(fs, dir_location*BLOCK_SIZE, SEEK_SET);
+		int w = fwrite(dir, sizeof(cs1550_directory_entry), 1, fs); //update the DIRECTORY entry
+		if (w!=1) printf("cs1550_write(): Writing data to directory entry failed.\n");
 
 
 		/** Find the block of the file that the offset points to **/
@@ -791,7 +797,7 @@ static int cs1550_read(const char *path, char *buf, size_t size, off_t offset,
 					printf("cs1550_write(): Do not need to create new block. Writing data to file block %i.\n", next_block);
 					memcpy(&curr_block->data[bytes_until_at_offset], buf, size);
 
-					int w = fwrite(curr_block, sizeof(cs1550_disk_block), 1, fs);
+					w = fwrite(curr_block, sizeof(cs1550_disk_block), 1, fs); //update the FILE entry
 					if (w!=1) printf("cs1550_write(): Writing data to file block %i failed.\n", next_block);
 					else printf("cs1550_write(): File data written to disk block %i.\n", next_block);
 				}
