@@ -136,7 +136,6 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 	char directory[25];
 
 	sscanf(path,  "/%[^/]/%[^.].%s", directory, filename, extension);
-	//printf("cs1550_getattr(): Directory: %s Filename: %s Extension %s\n", directory, filename, extension);
 
 	memset(stbuf, 0, sizeof(struct stat));
 
@@ -219,6 +218,8 @@ static int cs1550_getattr(const char *path, struct stat *stbuf)
 	}
 
 	if (fs != NULL) fclose(fs);
+	printf("cs1550_getattr(): file pointer closed\n");
+
 	return res;
 }
 
@@ -341,7 +342,7 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			initialize_filesystem();
 			filesystem_initialized = 1;
 		}
-		//	strcpy(directory_name, path+1); // +1 because of leading slash for root.
+
 		strncpy(directory_name, path+1, MAX_FILENAME);
 		directory_name[strlen(path)] = "\0";
 		/** Check to see if we need to return an error
@@ -378,6 +379,9 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 				fflush(stdout);
 			}
 			assert(r==0);
+			/** Are we at capacity for directories? **/
+			if ( root_dir->nDirectories >= MAX_DIRS_IN_ROOT ) { if (fs!=NULL) fclose(fs);
+				return -1; }
 			/** Does directory already exist? **/
 			for(i=0;i<MAX_DIRS_IN_ROOT;i++) {
 				if ( strcmp(root_dir->directories[i].dname, directory_name) == 0 ) { if (fs!=NULL) fclose(fs); return -EEXIST; }
@@ -587,8 +591,7 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			for(i=0;i<MAX_FILES_IN_DIR;i++) if (dir->files[i].fname[0] == NULL) break;
 			strncpy(dir->files[i].fname, filename, 8);
 			strncpy(dir->files[i].fext, extension, 3);
-			//	dir->files[i].fname[MAX_FILENAME] = '\0';
-			//	dir->files[i].fext[MAX_EXTENSION] = '\0';
+
 			dir->files[i].fsize = 0;
 			dir->files[i].nStartBlock = block_to_write;
 			printf("cs1550_mknod(): updating directory entry with filename %s.%s to byte location %i\n", dir->files[i].fname, dir->files[i].fext, dir_location*BLOCK_SIZE);
@@ -661,7 +664,9 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			FILE *fs = fopen(diskname, "rb");
 			cs1550_root_directory *root_dir=malloc(sizeof(cs1550_root_directory));
 			cs1550_directory_entry *dir = malloc(sizeof(cs1550_directory_entry));
+			cs1550_disk_block *curr_block = malloc(sizeof(cs1550_disk_block));
 			assert(fs != 0);
+			printf("cs1550_read(): Reading size: %i from offset: %i\n", size, offset);
 
 			/** GET ROOT **/
 			fseek(fs, 0, SEEK_SET);
@@ -692,14 +697,50 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 				return -1;
 			}
 
-			//check to make sure path exists
-			//check that size is > 0
-			//check that offset is <= to the file size
-			//read in data
-			//set size and return, or error
+			int bytes_read = 0;
+			int beginning_byte_in_block = offset; // when we are in the correct block,
+																					// this variable will be < 512, > 0,
+																					// and will refer to the first byte in
+																					// this block that we want to read
+			/** GET THE FIRST BLOCK OF THE FILE **/
+			fseek(fs, file_start_block*BLOCK_SIZE, SEEK_SET);
+			if ( fread(curr_block, sizeof(cs1550_disk_block), 1, fs) != 1 ) printf("cs1550_read(): Could not read first disk block from disk.\n");
+			else printf("cs1550_read(): Read first file block at block %i from disk.\n", file_start_block);
 
-			size = 0;
+			/** FIND THE FILE BLOCK THAT CONTAINS BYTE AT OFFEST **/
+			/** AFTER THIS WHILE LOOP, curr_block WILL BE THE BLOCK WE WANT **/
+			/** IF OFFSET IS IN THE FIRST BLOCK OF FILE, THIS WHILE IS BYPASSED **/
+			int next_block = file_start_block;
+			while ( beginning_byte_in_block > MAX_DATA_IN_BLOCK ) {
+				next_block = (int)curr_block->nNextBlock;
+				curr_block = malloc(sizeof(cs1550_disk_block));
+				fseek(fs, next_block*BLOCK_SIZE, SEEK_SET);
+				if ( fread(curr_block, sizeof(cs1550_disk_block), 1, fs) != 1 ) printf("cs1550_read(): Could not read block %i from disk.\n", next_block);
 
+				beginning_byte_in_block = beginning_byte_in_block - MAX_DATA_IN_BLOCK;
+			}
+			printf("cs1550_read(): Beginning read from block %i\n", next_block);
+			/** curr_block contains the first block we are going to read **/
+
+			/** BEGIN READING FILE **/
+			/** Read the first block. Outside of while because
+					we may not be reading it from the beginning. **/
+			memcpy(&buf[bytes_read], &curr_block->data[beginning_byte_in_block], MAX_DATA_IN_BLOCK);
+			bytes_read = bytes_read + MAX_DATA_IN_BLOCK;
+			int bytes_remaining_to_read = size;
+			while ( bytes_read < size ) {
+				bytes_remaining_to_read = size - bytes_read;
+				next_block = (int)curr_block->nNextBlock;
+				curr_block = malloc(sizeof(cs1550_disk_block));
+				fseek(fs, next_block*BLOCK_SIZE, SEEK_SET);
+				if ( fread(curr_block, sizeof(cs1550_disk_block), 1, fs) != 1 ) printf("cs1550_read(): Could not read block %i from disk.\n", next_block);
+				if (bytes_remaining_to_read < MAX_DATA_IN_BLOCK) { memcpy(&buf[bytes_read], curr_block->data, bytes_remaining_to_read); bytes_read = bytes_read + bytes_remaining_to_read; }
+				else { memcpy(&buf[bytes_read], curr_block->data, MAX_DATA_IN_BLOCK); bytes_read = bytes_read + MAX_DATA_IN_BLOCK; }
+
+			}
+			printf("cs1550_read(): Done reading file. Read %i bytes. Was supposed to read %i\n", bytes_read, size);
+
+			if (fs!=NULL) fclose(fs);
 			return size;
 		}
 
@@ -758,8 +799,8 @@ static int cs1550_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 					}
 				}
 				if (directory_exists == 0 || file_exists == 0) { printf("cs1550_write(): Directory or file does not exist.\n"); if (fs!=NULL) fclose(fs); return -1; }
-				if (size <= 0 || offset > file_size) { printf("cs1550_write(): Size <= 0 or offset > file_size. Size: %i Offset: %i File Size: %i\n", size, offset, file_size); if (fs!=NULL) fclose(fs); return -1;}
-				printf("cs1550_write(): offset: %i size: %i file_size: %i\n", offset, size, file_size);
+				if (size <= 0 ) { printf("cs1550_write(): Size <= 0 or offset > file_size. Size: %i Offset: %i File Size: %i\n", size, offset, file_size); if (fs!=NULL) fclose(fs); return -1;}
+				if (offset > file_size) { if (fs!=NULL) fclose(fs); return -EFBIG; }
 				/** Error checking done, now retrieve file's first block **/
 				int next_block = file_start_block;
 				printf("cs1550_write(): File to write to is located at block %i\n", file_start_block);
